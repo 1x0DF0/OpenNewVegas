@@ -1,54 +1,57 @@
 # Open New Vegas — Roadmap
 
-## Phase 0 — The World Map ✅
+**Mission: a free engine that plays Fallout: New Vegas one-to-one from the
+user's own game files.** No bundled assets, no copied engine code — a
+reimplementation, the way OpenMW did it for Morrowind (a ~decade-scale
+community effort; honesty about that scale is part of the plan).
 
-The map is the contract for everything that follows. It defines:
+## Milestone 1 — File formats ✅
 
-- A **world coordinate system**: 100×100 world units, x increases east,
-  y increases north. 1 world unit ≈ 350 m of real Mojave, so the playable
-  region is roughly 35×35 km — the area between Mt. Charleston, Primm,
-  Cottonwood Cove, and Lake Mead.
-- A **deterministic terrain model** (`map/js/terrain.js`): elevation is a pure
-  function of (x, y, seed). The same function will later drive engine-side
-  terrain generation, so the map viewer and the game world can never drift
-  apart.
-- The **location registry** (`map/js/data/locations.js`): the single source of
-  truth for what exists, where it is, and who controls it.
-- The **road network** (`map/js/data/roads.js`).
+The engine can read the two container formats everything else lives in:
 
-Deliverable: `map/index.html`, a zero-dependency interactive viewer.
+- ✅ **BSA v104** (`engine/formats/bsa.*`) — asset archives: directory parsing,
+  zlib decompression, per-file compression toggle, embedded names,
+  case-insensitive lookup, Bethesda name hashing
+- ✅ **ESM/ESP** (`engine/formats/esm.*`) — plugin files: record/GRUP tree,
+  24-byte FO3/FNV record headers, compressed records, XXXX oversized
+  subrecords, streaming walker API
+- ✅ CLI tools (`bsatool`, `esmdump`) + synthetic-fixture test suite
 
-## Phase 1 — Engine Bring-up (started: `engine/`)
+## Milestone 2 — Record schemas & asset decoding
 
-- ✅ C++ terrain core (`engine/terrain/`) — port of the JS model, verified to
-  produce identical elevations.
-- ✅ Heightmap exporter (`engine/tools/export_heightmap.cpp`) — 16-bit PGM.
-- Chunked cell export for streaming + LODs.
-- Renderer decision: custom C++ (OpenGL/Vulkan) vs. Godot 4 with the C++ core
-  as a GDExtension. Either way, the simulation/world code stays in C++.
-- Import the location registry as spawn markers.
+Turn raw records into typed game data:
 
-## Phase 2 — Walkable Worldspace
+- Decode key record types: `WRLD`/`CELL`/`LAND`/`REFR` (world geometry and
+  object placement), `STAT`/`NPC_`/`CREA` (things), `QUST`/`DIAL`/`INFO`
+  (quests and dialogue), `SCPT` (scripts)
+- FormID resolution and the master-file load order model
+- **NIF** mesh decoding (NetImmerse/Gamebryo geometry — community-documented
+  via niftools) and **DDS** textures
+- Validation harness: load `FalloutNV.esm` end-to-end, report coverage stats
 
-- Terrain streaming + collision.
-- Day/night cycle, Mojave weather (clear, overcast, dust storms).
-- Fast travel between discovered map markers.
+## Milestone 3 — Renderer: walk the real Mojave
 
-## Phase 3 — Core RPG Systems
+- Worldspace terrain from `LAND` records, object placement from `REFR`
+- Scene graph + culling; render interiors and the exterior worldspace
+- Free camera first, then player controller with collision
+- The map viewer (`map/`) becomes the in-engine debug atlas
 
-- Dialogue trees with skill checks.
-- Quest framework (stages, objectives, journal).
-- Faction reputation matrix (NCR ↔ Legion ↔ Strip ↔ independents).
-- Character stats: attributes, skills, perks (original implementations).
+## Milestone 4 — Gameplay systems
 
-## Phase 4 — Content
+- Script VM (the in-game scripting language used by the original)
+- Dialogue + quest state machine, journal, reputation/faction matrices
+- Combat, VATS-equivalent targeting, AI packages and schedules
+- Save/load (own format; import of original saves is stretch)
 
-- Original questlines and writing set in the same geography.
-- Settlement interiors, NPCs with schedules.
-- The Strip, Freeside, and the run for the Dam.
+## Milestone 5 — One-to-one parity
 
-## Non-goals
+- Full campaign playable: Goodsprings → endgame at Hoover Dam
+- DLC support (Dead Money, Honest Hearts, Old World Blues, Lonesome Road)
+- Mod compatibility (`.esp` plugins work as they do in the original)
 
-- **Never** redistributing, converting, or requiring proprietary game assets.
-- Engine-level compatibility with Gamebryo `.esm`/`.esp` formats (that's a
-  different project's fight).
+## Standing rules
+
+- **No Bethesda content in the repo. Ever.** Tests use synthetic fixtures.
+- **No decompiled or leaked engine code.** Formats are implemented from
+  community documentation (UESP, xEdit, niftools) — clean-room only.
+- The `map/` atlas stays: original code/data, useful as reference and debug UI.

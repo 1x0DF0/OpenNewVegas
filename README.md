@@ -1,76 +1,74 @@
 # Open New Vegas
 
-**An open-source recreation of the Mojave Wasteland.**
+**A free, open-source engine reimplementation for Fallout: New Vegas —
+the OpenMW approach, aimed at the Mojave.**
 
-Open New Vegas is a fan-driven, from-scratch rebuild of the world of the Mojave —
-the desert, the towns, the factions, and the stories — using **100% original code,
-data, and assets**. No game files are copied, extracted, or redistributed. Ever.
+The goal: a modern, open engine that plays the *actual* game, one-to-one —
+real quests, real dialogue, real world — by loading the **original data files
+from your own legally-purchased copy** of Fallout: New Vegas. This repository
+ships **zero** Bethesda content. You bring the game; we bring the engine.
 
-> ⚠️ **Legal note:** This is an unofficial fan project. It is not affiliated with,
-> endorsed by, or connected to Bethesda Softworks, Obsidian Entertainment, or
-> ZeniMax/Microsoft. *Fallout* is a trademark of its respective owners. This
-> project contains no proprietary game assets or data — everything here is
-> written from scratch. Most place names (Goodsprings, Primm, Searchlight,
-> Hoover Dam, Nellis...) are real locations in the Nevada Mojave.
+> ⚠️ **Legal note:** This is an unofficial fan project, not affiliated with or
+> endorsed by Bethesda Softworks, Obsidian Entertainment, or ZeniMax/Microsoft.
+> *Fallout* is a trademark of its respective owners. No proprietary assets,
+> data, or code are included or distributed — the engine reads file formats
+> that are publicly documented by the modding community, from files the user
+> already owns. This is the same legal model proven by
+> [OpenMW](https://openmw.org/) (Morrowind).
 
----
+## How "one-to-one" works
 
-## 🗺️ Phase 0: The World Map (you are here)
+Everything that makes New Vegas *New Vegas* lives in its data files:
 
-The first deliverable is the **world map** — the foundation everything else gets
-built on. It's live in this repo right now:
+| File | Contains |
+|------|----------|
+| `FalloutNV.esm` | The entire world: every cell, quest, NPC, dialogue line, script, item |
+| `*.bsa` archives | All assets: meshes, textures, sounds, voice acting, music |
 
-```
-map/index.html   ← open this in any browser. No build step, no dependencies.
-```
+An engine that fully understands those files plays the full game. That's the
+project: reimplement the engine, read the originals, render the Mojave.
 
-Or serve it locally:
+## Current status
+
+**Milestone 1 — read the game's file formats** ✅ working, tested
+
+- `engine/formats/bsa.*` — BSA v104 archive reader (the FO3/FNV asset format),
+  with zlib decompression and embedded-name support
+- `engine/formats/esm.*` — ESM/ESP plugin reader: record/GRUP tree walking,
+  compressed records, oversized (XXXX) subrecords
+- `engine/tools/bsatool` — list and extract archive contents
+- `engine/tools/esmdump` — inspect plugins: record counts, list worldspaces /
+  quests / NPCs by editor ID
+- `engine/tests/format_tests` — verified against synthetic fixture files
+  (no game data in the repo, ever)
+
+If you own the game, try it today:
 
 ```bash
-cd map && python3 -m http.server 8080
-# then open http://localhost:8080
+cd engine && cmake -B build && cmake --build build
+./build/esmdump counts "/path/to/FalloutNV/Data/FalloutNV.esm"
+./build/esmdump list  "/path/to/FalloutNV/Data/FalloutNV.esm" WRLD
+./build/bsatool list  "/path/to/FalloutNV/Data/Fallout - Meshes.bsa"
 ```
 
-### What the map includes
+## The world map
 
-- **Procedurally generated Mojave terrain** — the Spring Mountains, the Las Vegas
-  valley, the McCullough Range, the Colorado River, and Lake Mead are all
-  generated from a deterministic, seeded terrain model (`map/js/terrain.js`).
-  Real topography, zero copied heightmaps.
-- **40+ mapped locations** — settlements, vaults, faction camps, ruins, and
-  hazards, each with coordinates, faction control, and original descriptions
-  (`map/js/data/locations.js`).
-- **The road network** — I-15 (the Long 15), Highway 95, Highway 93 to the Dam,
-  Nipton Road, and Highway 160 (`map/js/data/roads.js`).
-- **Interactive viewer** — pan, zoom, hover for details, filter by location type,
-  search, and click-to-travel.
-- **C++ engine core** — the same terrain model, ported to C++ in
-  [`engine/`](engine/), with a 16-bit heightmap exporter for engine import.
-  The JS and C++ models are verified to produce identical elevations.
+`map/index.html` — an interactive, zero-dependency map of the Mojave with
+procedural terrain, 42 locations, and the road network. Open it in any
+browser. It doubles as the project's reference atlas and will become the
+debug/world-inspection overlay. See [`docs/WORLDBUILDING.md`](docs/WORLDBUILDING.md).
 
-## 🧭 Project Roadmap
+## Roadmap
 
-| Phase | Goal | Status |
-|-------|------|--------|
-| 0 | World map: terrain, locations, roads, viewer | ✅ In repo |
-| 1 | Engine bring-up (C++) + terrain export pipeline | 🚧 Started — see [`engine/`](engine/) |
-| 2 | Walkable worldspace: collision, time-of-day, weather | Planned |
-| 3 | Core systems: dialogue, quests, reputation, S.P.E.C.I.A.L.-like RPG stats | Planned |
-| 4 | Content: original questlines, characters, and writing | Planned |
+Full plan in [`docs/ROADMAP.md`](docs/ROADMAP.md). Short version:
 
-Details in [`docs/ROADMAP.md`](docs/ROADMAP.md). How the world is laid out and
-how to add locations: [`docs/WORLDBUILDING.md`](docs/WORLDBUILDING.md).
-
-## 🤝 Contributing
-
-The whole point of an open Mojave is that anyone can build on it. Good first
-contributions:
-
-- Add missing locations to `map/js/data/locations.js` (the format is documented
-  in `docs/WORLDBUILDING.md`)
-- Refine terrain features in `map/js/terrain.js`
-- Write original descriptions for mapped places
+1. ✅ **File formats** — BSA archives, ESM plugins
+2. **Asset decoding** — NIF meshes, DDS textures, record schemas (CELL, REFR, LAND…)
+3. **Renderer** — load and draw the real Mojave worldspace
+4. **Gameplay systems** — scripts, dialogue, quests, combat, AI
+5. **One-to-one parity** — the campaign, start to Hoover Dam
 
 ## License
 
-Code and original data in this repository are released under the MIT License.
+Engine code and original data in this repository: MIT License.
+Game data is not included and must be provided by the user from their own copy.
