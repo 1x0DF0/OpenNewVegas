@@ -33,6 +33,31 @@ std::string toLower(std::string s) {
     return s;
 }
 
+// Ensure `modelPath`'s geometry is present in `models`, loading it once via
+// `loader` on a cache miss. Returns true if a usable (non-empty) model is
+// available afterwards; false if it couldn't be loaded.
+bool ensureModelLoaded(std::map<std::string, Model>& models,
+                       const ModelLoader& loader,
+                       const std::string& modelPath) {
+    if (models.find(modelPath) != models.end()) return true;
+    auto model = loader(modelPath);
+    if (!model || model->meshes.empty()) return false;
+    models.emplace(modelPath, std::move(*model));
+    return true;
+}
+
+Instance makeInstance(const records::PlacedRef& ref,
+                      const std::string& modelPath) {
+    Instance inst;
+    inst.refrFormId = ref.formId;
+    inst.baseFormId = ref.baseFormId;
+    inst.modelPath = modelPath;
+    inst.x = ref.x; inst.y = ref.y; inst.z = ref.z;
+    inst.rotX = ref.rotX; inst.rotY = ref.rotY; inst.rotZ = ref.rotZ;
+    inst.scale = ref.scale;
+    return inst;
+}
+
 } // namespace
 
 Scene buildScene(const records::World& world,
@@ -62,42 +87,64 @@ Scene buildScene(const records::World& world,
                 continue;
             }
 
-            if (scene.models.find(modelPath) == scene.models.end()) {
-                auto model = loader(modelPath);
-                if (!model || model->meshes.empty()) {
-                    ++scene.missingModel;
-                    continue;
-                }
-                scene.models.emplace(modelPath, std::move(*model));
+            if (!ensureModelLoaded(scene.models, loader, modelPath)) {
+                ++scene.missingModel;
+                continue;
             }
 
-            Instance inst;
-            inst.refrFormId = ref.formId;
-            inst.baseFormId = ref.baseFormId;
-            inst.modelPath = modelPath;
-            inst.x = ref.x; inst.y = ref.y; inst.z = ref.z;
-            inst.rotX = ref.rotX; inst.rotY = ref.rotY; inst.rotZ = ref.rotZ;
-            inst.scale = ref.scale;
-            scene.instances.push_back(std::move(inst));
+            scene.instances.push_back(makeInstance(ref, modelPath));
         }
     }
     return scene;
 }
 
-// ── SceneStreamer ─── STUB: implemented by the streaming work stream. ────────
+// ── SceneStreamer ────────────────────────────────────────────────────────────
 SceneStreamer::SceneStreamer(const records::World& world,
                              const std::string& worldspaceEditorId,
                              ModelLoader loader)
     : world_(world), worldspaceEditorId_(worldspaceEditorId),
       loader_(std::move(loader)) {
     ws_ = pickWorldspace(world_, worldspaceEditorId_);
-    if (ws_) worldspaceEditorId_ = ws_->editorId;
+    if (!ws_) return;
+    worldspaceEditorId_ = ws_->editorId;
+
+    // Record every cell holding at least one REFR. ws_->cells is keyed by
+    // (gridX, gridY) in a std::map, so iteration is already sorted; copying
+    // those keys keeps populated_ deterministic.
+    for (const auto& [grid, cell] : ws_->cells) {
+        if (!cell.refs.empty()) populated_.emplace_back(grid.first, grid.second);
+    }
 }
 
 const std::vector<Instance>& SceneStreamer::cellInstances(int gx, int gy) {
-    static const std::vector<Instance> kEmpty;
-    (void)gx; (void)gy;
-    return kEmpty;
+    const std::pair<int, int> key{gx, gy};
+
+    const auto cached = cellCache_.find(key);
+    if (cached != cellCache_.end()) return cached->second;
+
+    // Insert the (initially empty) entry first so the returned reference is
+    // stable: std::map references survive subsequent inserts, and an
+    // empty/absent cell is cached as an empty vector.
+    std::vector<Instance>& out = cellCache_[key];
+
+    if (!ws_) return out;
+    const auto cellIt = ws_->cells.find(
+        {static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy)});
+    if (cellIt == ws_->cells.end()) return out;
+
+    for (const auto& ref : cellIt->second.refs) {
+        // Only static objects (STAT) are placed. Other base types are skipped.
+        const auto baseIt = world_.statics.find(ref.baseFormId);
+        if (baseIt == world_.statics.end()) continue;
+        const std::string& modelPath = baseIt->second.modelPath;
+        if (modelPath.empty()) continue;
+
+        // Lazily load into the shared model cache (loads once across all cells).
+        if (!ensureModelLoaded(models_, loader_, modelPath)) continue;
+
+        out.push_back(makeInstance(ref, modelPath));
+    }
+    return out;
 }
 
 const Model* SceneStreamer::model(const std::string& modelPath) const {

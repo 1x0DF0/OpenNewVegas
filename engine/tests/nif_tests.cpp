@@ -56,12 +56,17 @@ struct Builder {
     std::size_t size() const { return buf.size(); }
 };
 
+// BS Data Flags bit marking a present UV set (BSGeometryDataFlags Has_UV).
+constexpr std::uint16_t BSGDF_HAS_UV = 0x0001;
+
 bool feq(float a, float b) { return std::fabs(a - b) < 1e-6f; }
 
-// Build a NiGeometryData base (no normals/colors/uv) for `verts` vertices and
-// the given Num Triangles value. Returns the block body fragment.
+// Build a NiGeometryData base (no normals/colors) for `verts` vertices and the
+// given Num Triangles value. If `uvs` is non-empty (one u,v pair per vertex),
+// a single UV set is written and the BS Data Flags Has_UV bit is set.
 void writeGeometryBase(Builder& b, const std::vector<float>& verts,
-                       std::uint16_t numTriangles) {
+                       std::uint16_t numTriangles,
+                       const std::vector<float>& uvs = {}) {
     const std::uint16_t numVerts =
         static_cast<std::uint16_t>(verts.size() / 3);
     b.i32(0);              // Group ID
@@ -71,30 +76,44 @@ void writeGeometryBase(Builder& b, const std::vector<float>& verts,
     b.u8(1);               // Has Vertices
     for (std::size_t i = 0; i < numVerts; ++i)
         b.vector3(verts[i * 3], verts[i * 3 + 1], verts[i * 3 + 2]);
-    b.u16(0);              // BS Data Flags (no UV, no tangents)
+    const bool hasUv = !uvs.empty();
+    b.u16(hasUv ? BSGDF_HAS_UV : 0); // BS Data Flags (Has_UV bit; no tangents)
     b.u8(0);               // Has Normals = false
     b.vector3(0, 0, 0);    // Center
     b.f32(0);              // Radius
     b.u8(0);               // Has Vertex Colors = false
-    // UV sets = 0 (BS Data Flags has no Has-UV bit)
+    // UV set (one, when present): Num Vertices TexCoord (two float32) entries.
+    if (hasUv)
+        for (std::size_t i = 0; i < numVerts; ++i) {
+            b.f32(uvs[i * 2 + 0]);
+            b.f32(uvs[i * 2 + 1]);
+        }
     b.u16(0);              // Consistency Flags
     b.i32(-1);             // Additional Data ref
     b.u16(numTriangles);   // Num Triangles (NiTriBasedGeomData)
 }
 
-// Build a full NIF with two data blocks: a NiTriShapeData and a
-// NiTriStripsData. The header carries a faithful 20.2.0.7 stream header and a
-// per-block size table so the decoder resyncs between blocks.
+// Build a full NIF with two geometry data blocks (a NiTriShapeData and a
+// NiTriStripsData) and, optionally, a trailing BSShaderTextureSet block. The
+// header carries a faithful 20.2.0.7 stream header and a per-block size table so
+// the decoder resyncs between blocks.
+//
+// `shapeUvs`, if non-empty, writes a single UV set (one u,v pair per vertex)
+// into the NiTriShapeData block. `diffusePath`, if non-empty, appends a
+// BSShaderTextureSet block whose index-0 (diffuse) texture is that path.
 std::vector<std::uint8_t> buildNif(
     const std::vector<float>& shapeVerts,
     const std::vector<std::uint16_t>& shapeTris,
     const std::vector<float>& stripVerts,
-    const std::vector<std::uint16_t>& strip) {
+    const std::vector<std::uint16_t>& strip,
+    const std::vector<float>& shapeUvs = {},
+    const std::string& diffusePath = {}) {
 
     // ── Block 0: NiTriShapeData body ──
     Builder block0;
     writeGeometryBase(block0, shapeVerts,
-                      static_cast<std::uint16_t>(shapeTris.size() / 3));
+                      static_cast<std::uint16_t>(shapeTris.size() / 3),
+                      shapeUvs);
     block0.u32(static_cast<std::uint32_t>(shapeTris.size())); // Num Triangle Points
     block0.u8(1); // Has Triangles
     for (std::uint16_t idx : shapeTris) block0.u16(idx);
@@ -111,13 +130,25 @@ std::vector<std::uint8_t> buildNif(
     block1.u8(1);  // Has Points
     for (std::uint16_t idx : strip) block1.u16(idx);
 
+    // ── Optional Block 2: BSShaderTextureSet body ──
+    // Num Textures, then SizedString[Num Textures]; index 0 is the diffuse map.
+    const bool hasTexSet = !diffusePath.empty();
+    Builder block2;
+    if (hasTexSet) {
+        block2.u32(2);                 // Num Textures
+        block2.sizedString(diffusePath);       // [0] diffuse
+        block2.sizedString("textures\\test_n.dds"); // [1] normal map
+    }
+
+    const std::uint32_t numBlocks = hasTexSet ? 3 : 2;
+
     // ── Header ──
     Builder b;
     b.headerLine("Gamebryo File Format, Version 20.2.0.7");
     b.u32(0x14020007);     // Version
     b.u8(1);               // Endian (little)
     b.u32(11);             // User Version
-    b.u32(2);              // Num Blocks
+    b.u32(numBlocks);      // Num Blocks
 
     // Bethesda stream header
     b.u32(34);             // BS Version
@@ -126,15 +157,18 @@ std::vector<std::uint8_t> buildNif(
     b.exportString("");                   // Export Script
 
     // Block type table
-    b.u16(2);              // Num Block Types
+    b.u16(hasTexSet ? 3 : 2);  // Num Block Types
     b.sizedString("NiTriShapeData");
     b.sizedString("NiTriStripsData");
+    if (hasTexSet) b.sizedString("BSShaderTextureSet");
     b.u16(0);              // Block Type Index[0] -> NiTriShapeData
     b.u16(1);              // Block Type Index[1] -> NiTriStripsData
+    if (hasTexSet) b.u16(2); // Block Type Index[2] -> BSShaderTextureSet
 
     // Block sizes
     b.u32(static_cast<std::uint32_t>(block0.size()));
     b.u32(static_cast<std::uint32_t>(block1.size()));
+    if (hasTexSet) b.u32(static_cast<std::uint32_t>(block2.size()));
 
     // String table (empty)
     b.u32(0);              // Num Strings
@@ -146,6 +180,7 @@ std::vector<std::uint8_t> buildNif(
     // Block bodies
     b.bytes(block0.buf);
     b.bytes(block1.buf);
+    if (hasTexSet) b.bytes(block2.buf);
 
     return b.buf;
 }
@@ -221,6 +256,61 @@ void testStripDegenerate() {
     std::printf("NIF: degenerate strip triangles dropped (5v strip -> 1t)\n");
 }
 
+// UVs surfaced parallel to vertices, and the diffuse texture path surfaced from
+// a BSShaderTextureSet block.
+void testUvsAndDiffuseTexture() {
+    const std::vector<float> shapeVerts = {
+        0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,
+        1.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+    };
+    const std::vector<std::uint16_t> shapeTris = {0, 1, 2, 0, 2, 3};
+    // One u,v pair per vertex.
+    const std::vector<float> shapeUvs = {
+        0.0f, 0.0f,
+        1.0f, 0.0f,
+        1.0f, 1.0f,
+        0.0f, 1.0f,
+    };
+
+    const std::vector<float> stripVerts = {
+        0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 1.0f,
+        2.0f, 0.0f, 0.0f,
+        3.0f, 0.0f, 1.0f,
+        4.0f, 0.0f, 0.0f,
+    };
+    const std::vector<std::uint16_t> strip = {0, 1, 2, 3, 4};
+
+    const std::string diffuse = "textures\\landscape\\rock01.dds";
+    const auto nif = buildNif(shapeVerts, shapeTris, stripVerts, strip,
+                              shapeUvs, diffuse);
+    const auto meshes = onv::nif::decode(nif);
+
+    CHECK(meshes.size() == 2);
+    if (meshes.size() != 2) return;
+
+    // ── UVs: exact and parallel to the vertices on the shape. ──
+    const auto& shape = meshes[0];
+    CHECK(shape.uvs.size() == shapeUvs.size());
+    for (std::size_t i = 0; i < shapeUvs.size() && i < shape.uvs.size(); ++i)
+        CHECK(feq(shape.uvs[i], shapeUvs[i]));
+    // Triangles must still decode correctly past the UV data.
+    CHECK(shape.indices == shapeTris);
+    // Strip shape carries no UVs -> uvs left empty.
+    CHECK(meshes[1].uvs.empty());
+
+    // ── Diffuse texture path surfaced from the BSShaderTextureSet block. ──
+    // (Per the decoder's documented single-texture-set approximation, the
+    // file's first diffuse path is attached to shapes lacking one.)
+    CHECK(shape.diffuseTexture == diffuse);
+    CHECK(meshes[1].diffuseTexture == diffuse);
+
+    std::printf("NIF: UV set surfaced (4v) + diffuse '%s' from BSShaderTextureSet\n",
+                diffuse.c_str());
+}
+
 void testRejectsBadInput() {
     bool threw = false;
     try {
@@ -248,6 +338,7 @@ void testRejectsBadInput() {
 int main() {
     testTriShapeAndStrips();
     testStripDegenerate();
+    testUvsAndDiffuseTexture();
     testRejectsBadInput();
 
     if (failures) {

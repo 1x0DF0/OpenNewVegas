@@ -123,10 +123,119 @@ int main() {
         CHECK(auto_ws.instances.size() == 3);
     }
 
+    // ── SceneStreamer: cell-at-a-time streaming with a shared model cache ──
+    {
+        // A worldspace with two populated cells and one empty cell. (0,0) holds
+        // two rocks (shared model) + a shack; (1,0) holds one more rock (same
+        // boulder model as (0,0), so it must reuse the cached model).
+        records::World sw;
+        sw.statics[0x100] = {0x100, "RockBoulder", "rocks\\boulder01.nif"};
+        sw.statics[0x101] = {0x101, "Shack",       "architecture\\shack.nif"};
+        sw.statics[0x102] = {0x102, "NoModelStat", ""}; // STAT, empty model
+
+        records::Worldspace sws;
+        sws.formId = 0x20;
+        sws.editorId = "WastelandNV";
+
+        records::ExteriorCell c00;
+        c00.gridX = 0; c00.gridY = 0;
+        c00.refs.push_back(makeRef(0xA0, 0x100, 100, 200, 30, 1.0f));
+        c00.refs.push_back(makeRef(0xA1, 0x100, 400, 500, 60, 2.5f));
+        c00.refs.push_back(makeRef(0xA2, 0x101, 700, 800, 90, 1.0f));
+        c00.refs.push_back(makeRef(0xA3, 0x102, 0, 0, 0, 1.0f)); // modelless STAT
+        c00.refs.push_back(makeRef(0xA4, 0x999, 0, 0, 0, 1.0f)); // unknown base
+        sws.cells.emplace(std::make_pair(0, 0), std::move(c00));
+
+        records::ExteriorCell c10;
+        c10.gridX = 1; c10.gridY = 0;
+        c10.refs.push_back(makeRef(0xB0, 0x100, 10, 20, 30, 1.0f)); // shared model
+        sws.cells.emplace(std::make_pair(1, 0), std::move(c10));
+
+        // A cell with no refs at all: must not appear in populatedCells().
+        records::ExteriorCell empty;
+        empty.gridX = 2; empty.gridY = 0;
+        sws.cells.emplace(std::make_pair(2, 0), std::move(empty));
+
+        sw.worldspaces.push_back(std::move(sws));
+
+        int swCalls = 0;
+        auto swLoader = [&](const std::string& path) -> std::optional<scene::Model> {
+            ++swCalls;
+            scene::Model m;
+            nif::Mesh mesh;
+            mesh.vertices = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+            mesh.indices = {0, 1, 2};
+            m.meshes.push_back(std::move(mesh));
+            (void)path;
+            return m;
+        };
+
+        scene::SceneStreamer streamer(sw, "WastelandNV", swLoader);
+        CHECK(streamer.worldspaceEditorId() == "WastelandNV");
+
+        // populatedCells lists exactly the cells with REFRs (empty cell omitted),
+        // sorted deterministically by (gx, gy).
+        const auto& pop = streamer.populatedCells();
+        CHECK(pop.size() == 2);
+        if (pop.size() == 2) {
+            CHECK(pop[0] == std::make_pair(0, 0));
+            CHECK(pop[1] == std::make_pair(1, 0));
+        }
+
+        // Nothing loaded until a cell is streamed.
+        CHECK(swCalls == 0);
+        CHECK(streamer.model("rocks\\boulder01.nif") == nullptr);
+
+        // Stream (0,0): two rocks + one shack = 3 instances; boulder loaded once.
+        const auto& inst00 = streamer.cellInstances(0, 0);
+        CHECK(inst00.size() == 3);
+        CHECK(swCalls == 2); // boulder + shack, deduped within the cell
+
+        // model() returns non-null after the cell that uses it is streamed.
+        CHECK(streamer.model("rocks\\boulder01.nif") != nullptr);
+        CHECK(streamer.model("architecture\\shack.nif") != nullptr);
+
+        // Transforms carried through verbatim.
+        const scene::Instance* rock2 = nullptr;
+        for (const auto& i : inst00)
+            if (i.refrFormId == 0xA1) rock2 = &i;
+        CHECK(rock2 != nullptr);
+        if (rock2) {
+            CHECK(rock2->baseFormId == 0x100);
+            CHECK(rock2->modelPath == "rocks\\boulder01.nif");
+            CHECK(feq(rock2->x, 400) && feq(rock2->y, 500) && feq(rock2->z, 60));
+            CHECK(feq(rock2->scale, 2.5f));
+        }
+
+        // Stream (1,0): one rock reusing the cached boulder model -> NO new load.
+        const auto& inst10 = streamer.cellInstances(1, 0);
+        CHECK(inst10.size() == 1);
+        CHECK(swCalls == 2); // shared cache across cells: loader not called again
+        if (inst10.size() == 1) {
+            CHECK(inst10[0].refrFormId == 0xB0);
+            CHECK(inst10[0].modelPath == "rocks\\boulder01.nif");
+        }
+
+        // Repeated request returns the cached result; loader not invoked again.
+        const auto& inst00b = streamer.cellInstances(0, 0);
+        CHECK(&inst00b == &inst00); // same cached vector reference
+        CHECK(inst00b.size() == 3);
+        CHECK(swCalls == 2);
+
+        // An empty (no-ref) cell yields an empty instance list.
+        const auto& instEmpty = streamer.cellInstances(2, 0);
+        CHECK(instEmpty.empty());
+
+        // An absent cell (not in the worldspace) also yields an empty list.
+        const auto& instAbsent = streamer.cellInstances(99, 99);
+        CHECK(instAbsent.empty());
+        CHECK(swCalls == 2); // empty/absent cells trigger no loads
+    }
+
     if (failures) {
         std::printf("%d FAILURES\n", failures);
         return 1;
     }
-    std::printf("all scene tests passed (placement, dedupe, skip, radius)\n");
+    std::printf("all scene tests passed (placement, dedupe, skip, radius, streamer)\n");
     return 0;
 }

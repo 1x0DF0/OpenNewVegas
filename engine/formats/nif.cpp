@@ -23,9 +23,11 @@
 //     block types never derail parsing.
 //
 // WHAT IS NOT HANDLED (intentionally, for this milestone)
-//   * Materials, textures, shaders (BSLightingShaderProperty, etc.).
-//   * Normals, tangents, bitangents, vertex colours, UV coordinates — we read
-//     past them to reach the triangle data, but do not surface them.
+//   * Shaders proper (BSLightingShaderProperty parameters, etc.). We DO surface
+//     the diffuse texture path from BSShaderTextureSet blocks (see below).
+//   * Normals, tangents, bitangents, vertex colours — we read past them to
+//     reach the triangle data, but do not surface them. The FIRST UV set IS
+//     now surfaced (Mesh.uvs), parallel to the vertices.
 //   * Skinning / animation / morph data, NiSkinInstance, controllers.
 //   * The scene-graph transform hierarchy: vertices are returned in their
 //     local NiTriShape space (no NiNode world-transform composition yet).
@@ -153,7 +155,8 @@ Header readHeader(BinaryReader& r) {
 
 // Read the NiGeometryData base portion (common to NiTriShapeData and
 // NiTriStripsData) up to and including the NiTriBasedGeomData "Num Triangles"
-// field. Fills `vertices` (x,y,z triples) and returns numTriangles.
+// field. Fills `vertices` (x,y,z triples) and `uvs` (u,v pairs parallel to the
+// vertices; left empty if the shape carries no UV set) and returns numTriangles.
 //
 // Layout for 20.2.0.7 / BS 34 (niftools nif.xml NiGeometryData):
 //   int32   Group ID
@@ -170,11 +173,13 @@ Header readHeader(BinaryReader& r) {
 //   Vector3 Center; float Radius    (bounding sphere)
 //   bool    Has Vertex Colors       (1 byte)
 //   Color4  Vertex Colors[N]        (16 bytes each, if Has Vertex Colors)
-//   TexCoord UV[N]                  (8 bytes each, count from flags)
+//   TexCoord UV[set][N]             (8 bytes each: two float32 u,v; set count
+//                                    from BS Data Flags low nibble / Has_UV bit)
 //   uint16  Consistency Flags
 //   int32   Additional Data (ref)
 //   uint16  Num Triangles           (NiTriBasedGeomData)
-std::uint16_t readGeometryBase(BinaryReader& r, std::vector<float>& vertices) {
+std::uint16_t readGeometryBase(BinaryReader& r, std::vector<float>& vertices,
+                               std::vector<float>& uvs) {
     r.read<std::int32_t>();                              // Group ID
     const std::uint16_t numVertices = r.read<std::uint16_t>();
     r.read<std::uint8_t>();                              // Keep Flags
@@ -210,10 +215,32 @@ std::uint16_t readGeometryBase(BinaryReader& r, std::vector<float>& vertices) {
     if (hasColors)
         r.skip(static_cast<std::size_t>(numVertices) * 16); // Color4[N]
 
-    // UV-set count: for BS202 the generic Data Flags is 0, so the only UV bit
-    // is BS Data Flags "Has UV" (0x0001) -> 0 or 1 set of Num Vertices coords.
-    const int numUvSets = (bsDataFlags & BSGDF_HAS_UV) ? 1 : 0;
-    r.skip(static_cast<std::size_t>(numUvSets) * numVertices * 8); // TexCoord
+    // UV sets. For 20.2.0.7 / BS 34 the BSGeometryDataFlags low nibble holds
+    // the number of UV sets and bit 0 (Has_UV, 0x0001) marks their presence;
+    // in practice FNV static meshes carry exactly one set when textured. Each
+    // set is `Num Vertices` TexCoord entries of two float32 (u,v).
+    //
+    // We capture the FIRST UV set into `uvs` (parallel to vertices: 2 floats
+    // per vertex) and skip any additional sets. If Has_UV is clear we leave
+    // `uvs` empty.
+    uvs.clear();
+    int numUvSets = 0;
+    if (bsDataFlags & BSGDF_HAS_UV) {
+        // Low nibble = UV-set count; clamp to >=1 since Has_UV is set.
+        numUvSets = bsDataFlags & 0x000F;
+        if (numUvSets < 1) numUvSets = 1;
+    }
+    for (int set = 0; set < numUvSets; ++set) {
+        if (set == 0) {
+            uvs.resize(static_cast<std::size_t>(numVertices) * 2);
+            for (std::uint16_t i = 0; i < numVertices; ++i) {
+                uvs[i * 2 + 0] = r.read<float>();
+                uvs[i * 2 + 1] = r.read<float>();
+            }
+        } else {
+            r.skip(static_cast<std::size_t>(numVertices) * 8); // extra set
+        }
+    }
 
     r.read<std::uint16_t>(); // Consistency Flags
     r.read<std::int32_t>();  // Additional Data (ref)
@@ -229,7 +256,7 @@ std::uint16_t readGeometryBase(BinaryReader& r, std::vector<float>& vertices) {
 //   MatchGroup Match Groups[...]
 Mesh readTriShapeData(BinaryReader& r) {
     Mesh m;
-    const std::uint16_t numTriangles = readGeometryBase(r, m.vertices);
+    const std::uint16_t numTriangles = readGeometryBase(r, m.vertices, m.uvs);
 
     r.read<std::uint32_t>(); // Num Triangle Points (= numTriangles * 3)
     const std::uint8_t hasTriangles = r.read<std::uint8_t>();
@@ -254,7 +281,7 @@ Mesh readTriShapeData(BinaryReader& r) {
 // strip-to-list expansion.
 Mesh readTriStripsData(BinaryReader& r) {
     Mesh m;
-    readGeometryBase(r, m.vertices); // Num Triangles is informational here
+    readGeometryBase(r, m.vertices, m.uvs); // Num Triangles is informational here
 
     const std::uint16_t numStrips = r.read<std::uint16_t>();
     std::vector<std::uint16_t> stripLengths(numStrips);
@@ -289,6 +316,23 @@ Mesh readTriStripsData(BinaryReader& r) {
     return m;
 }
 
+// BSShaderTextureSet block (niftools nif.xml, 20.2.0.7 / BS 34):
+//   uint32     Num Textures
+//   SizedString Textures[Num Textures]   (uint32 length + chars, no NUL)
+//
+// Index 0 is the diffuse map (e.g. "textures\\landscape\\rock01.dds"); index 1
+// is the normal/gloss map, etc. We return the diffuse (index 0), or "" if the
+// set is empty.
+std::string readShaderTextureSetDiffuse(BinaryReader& r) {
+    const std::uint32_t numTextures = r.read<std::uint32_t>();
+    std::string diffuse;
+    for (std::uint32_t i = 0; i < numTextures; ++i) {
+        const std::string s = readSizedString(r);
+        if (i == 0) diffuse = s;
+    }
+    return diffuse;
+}
+
 } // namespace
 
 std::vector<Mesh> decode(const std::vector<std::uint8_t>& bytes) {
@@ -296,6 +340,22 @@ std::vector<Mesh> decode(const std::vector<std::uint8_t>& bytes) {
     const Header h = readHeader(r);
 
     std::vector<Mesh> meshes;
+
+    // Diffuse texture association (APPROXIMATION — see note below).
+    //
+    // Correctly associating a texture set with a specific shape means walking
+    // the block-reference graph: NiTriShape -> Properties[]/Shader ref ->
+    // BSShaderPPLightingProperty | BSLightingShaderProperty -> Texture Set ref
+    // -> BSShaderTextureSet. That ref graph is not decoded in this pass.
+    //
+    // Pragmatic approach: we collect the diffuse path from the FIRST
+    // BSShaderTextureSet block in the file and, after decoding all geometry,
+    // attach it to every shape that lacks one. This is exact when a NIF has a
+    // single material/texture set (the common case for FNV static meshes that
+    // share one diffuse), and a documented best-effort otherwise. Per-shape
+    // texture-set resolution via the ref graph is left for a later pass.
+    std::string firstDiffuse;
+
     for (std::uint32_t i = 0; i < h.numBlocks; ++i) {
         const std::size_t blockStart = r.pos();
         const std::size_t blockSize = h.blockSizes[i];
@@ -307,11 +367,21 @@ std::vector<Mesh> decode(const std::vector<std::uint8_t>& bytes) {
             meshes.push_back(readTriShapeData(r));
         } else if (type == "NiTriStripsData") {
             meshes.push_back(readTriStripsData(r));
+        } else if (type == "BSShaderTextureSet") {
+            const std::string diffuse = readShaderTextureSetDiffuse(r);
+            if (firstDiffuse.empty()) firstDiffuse = diffuse;
         }
         // Always resync to the next block via the size table, so partially-read
         // or unknown blocks cannot desynchronise the stream.
         r.seek(blockStart + blockSize);
     }
+
+    // Attach the file's first diffuse path to every shape lacking one.
+    if (!firstDiffuse.empty()) {
+        for (Mesh& m : meshes)
+            if (m.diffuseTexture.empty()) m.diffuseTexture = firstDiffuse;
+    }
+
     return meshes;
 }
 
