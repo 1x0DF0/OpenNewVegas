@@ -38,7 +38,20 @@ project: reimplement the engine, read the originals, render the Mojave.
 
 ## Current status
 
-**Milestone 3 (started) — placed objects in the world** ✅
+**Milestone 4 — textured objects + streaming** ✅
+
+- `engine/formats/nif.*` now surfaces per-shape **UV coordinates** and the
+  **diffuse texture path** from each shape's texture set
+- `engine/render/texture_cache` decodes a texture path to RGBA via the Data
+  VFS (DDS decoder), cached by path
+- `engine/scene/SceneStreamer` streams placed objects a cell at a time around
+  the player, sharing one model cache across cells
+- the native `walker` renders objects **textured** (UV-mapped, lit), in one
+  draw per material, loading objects around the player as you move. Try
+  `walker --demo` to see textured boxes (a checkerboard) on the Mojave with no
+  game files needed.
+
+**Milestone 3 — placed objects in the world** ✅
 
 The engine now turns object *placements* into rendered geometry:
 

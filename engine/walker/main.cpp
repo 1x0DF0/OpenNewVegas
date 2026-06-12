@@ -18,6 +18,7 @@
 #include "../assets/data_files.hpp"
 #include "../platform/game_locator.hpp"
 #include "../records/records.hpp"
+#include "../render/texture_cache.hpp"
 #include "../scene/scene.hpp"
 #include "../terrain/terrain.hpp"
 
@@ -25,6 +26,7 @@
 #include <SDL_opengl.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -290,64 +292,109 @@ void gameUnitsToWalker(float ux, float uy, float uz,
     wz = -uy * U;
 }
 
-// Flatten a scene's instances into one lit, flat-shaded triangle soup in
-// walker meters: 6 floats per vertex (position3, normal3). Each instance's
-// local mesh is scaled, rotated (Rz*Ry*Rx), translated by the REFR position,
-// then converted to walker space.
-std::vector<float> bakeScene(const onv::scene::Scene& sc) {
-    std::vector<float> out;
-    for (const auto& inst : sc.instances) {
-        const auto it = sc.models.find(inst.modelPath);
-        if (it == sc.models.end()) continue;
+// Objects are baked into per-material batches keyed by diffuse texture path
+// (the empty key means "untextured"). Each vertex is 8 floats: position3,
+// normal3, uv2 — in walker meters. The instance's local mesh is scaled,
+// rotated (Rz*Ry*Rx), translated by the REFR position, then converted to
+// walker space. Flat per-face normals; UVs pass through from the NIF.
+using ObjectBatches = std::map<std::string, std::vector<float>>;
 
-        const float cx = std::cos(inst.rotX), sx = std::sin(inst.rotX);
-        const float cy = std::cos(inst.rotY), sy = std::sin(inst.rotY);
-        const float cz = std::cos(inst.rotZ), sz = std::sin(inst.rotZ);
-        // R = Rz * Ry * Rx (row-major 3x3)
-        const float R[9] = {
-            cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
-            sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
-            -sy,     cy * sx,                cy * cx};
+void bakeInstance(ObjectBatches& batches, const onv::scene::Instance& inst,
+                  const onv::scene::Model* model) {
+    if (!model) return;
 
-        auto place = [&](float lx, float ly, float lz,
-                         float& ox, float& oy, float& oz) {
-            lx *= inst.scale; ly *= inst.scale; lz *= inst.scale;
-            const float rx = R[0] * lx + R[1] * ly + R[2] * lz;
-            const float ry = R[3] * lx + R[4] * ly + R[5] * lz;
-            const float rz = R[6] * lx + R[7] * ly + R[8] * lz;
-            gameUnitsToWalker(rx + inst.x, ry + inst.y, rz + inst.z, ox, oy, oz);
-        };
+    const float cx = std::cos(inst.rotX), sx = std::sin(inst.rotX);
+    const float cy = std::cos(inst.rotY), sy = std::sin(inst.rotY);
+    const float cz = std::cos(inst.rotZ), sz = std::sin(inst.rotZ);
+    const float R[9] = {
+        cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
+        sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
+        -sy,     cy * sx,                cy * cx};
 
-        for (const auto& mesh : it->second.meshes) {
-            for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
-                float v[3][3];
-                for (int k = 0; k < 3; ++k) {
-                    const std::uint16_t idx = mesh.indices[t + k];
-                    if (static_cast<std::size_t>(idx) * 3 + 2 >= mesh.vertices.size())
-                        goto next_tri;
-                    place(mesh.vertices[idx * 3], mesh.vertices[idx * 3 + 1],
-                          mesh.vertices[idx * 3 + 2], v[k][0], v[k][1], v[k][2]);
-                }
-                {
-                    // Flat face normal.
-                    const float ax = v[1][0] - v[0][0], ay = v[1][1] - v[0][1],
-                                az = v[1][2] - v[0][2];
-                    const float bx = v[2][0] - v[0][0], by = v[2][1] - v[0][1],
-                                bz = v[2][2] - v[0][2];
-                    float nx = ay * bz - az * by, ny = az * bx - ax * bz,
-                          nz = ax * by - ay * bx;
-                    const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-                    if (len > 1e-8f) { nx /= len; ny /= len; nz /= len; }
-                    for (int k = 0; k < 3; ++k) {
-                        out.insert(out.end(),
-                                   {v[k][0], v[k][1], v[k][2], nx, ny, nz});
-                    }
-                }
-            next_tri:;
+    auto place = [&](float lx, float ly, float lz,
+                     float& ox, float& oy, float& oz) {
+        lx *= inst.scale; ly *= inst.scale; lz *= inst.scale;
+        const float rx = R[0] * lx + R[1] * ly + R[2] * lz;
+        const float ry = R[3] * lx + R[4] * ly + R[5] * lz;
+        const float rz = R[6] * lx + R[7] * ly + R[8] * lz;
+        gameUnitsToWalker(rx + inst.x, ry + inst.y, rz + inst.z, ox, oy, oz);
+    };
+
+    for (const auto& mesh : model->meshes) {
+        std::vector<float>& out = batches[mesh.diffuseTexture];
+        const bool hasUv =
+            mesh.uvs.size() == (mesh.vertices.size() / 3) * 2;
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            float v[3][3], uv[3][2];
+            for (int k = 0; k < 3; ++k) {
+                const std::uint16_t idx = mesh.indices[t + k];
+                if (static_cast<std::size_t>(idx) * 3 + 2 >= mesh.vertices.size())
+                    goto next_tri;
+                place(mesh.vertices[idx * 3], mesh.vertices[idx * 3 + 1],
+                      mesh.vertices[idx * 3 + 2], v[k][0], v[k][1], v[k][2]);
+                uv[k][0] = hasUv ? mesh.uvs[idx * 2] : 0.0f;
+                uv[k][1] = hasUv ? mesh.uvs[idx * 2 + 1] : 0.0f;
             }
+            {
+                const float ax = v[1][0] - v[0][0], ay = v[1][1] - v[0][1],
+                            az = v[1][2] - v[0][2];
+                const float bx = v[2][0] - v[0][0], by = v[2][1] - v[0][1],
+                            bz = v[2][2] - v[0][2];
+                float nx = ay * bz - az * by, ny = az * bx - ax * bz,
+                      nz = ax * by - ay * bx;
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (len > 1e-8f) { nx /= len; ny /= len; nz /= len; }
+                for (int k = 0; k < 3; ++k)
+                    out.insert(out.end(), {v[k][0], v[k][1], v[k][2],
+                                           nx, ny, nz, uv[k][0], uv[k][1]});
+            }
+        next_tri:;
         }
     }
-    return out;
+}
+
+ObjectBatches bakeBatches(const onv::scene::Scene& sc) {
+    ObjectBatches batches;
+    for (const auto& inst : sc.instances) {
+        const auto it = sc.models.find(inst.modelPath);
+        bakeInstance(batches, inst, it == sc.models.end() ? nullptr : &it->second);
+    }
+    return batches;
+}
+
+// ── GL texture helpers ──────────────────────────────────────────────────────
+GLuint uploadTexture(const unsigned char* rgba, int w, int h) {
+    GLuint id = 0;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, rgba);
+    return id;
+}
+
+GLuint makeSolidTexture(unsigned char r, unsigned char g, unsigned char b) {
+    const unsigned char px[4] = {r, g, b, 255};
+    return uploadTexture(px, 1, 1);
+}
+
+// A simple checkerboard so the textured draw path is visible without game data.
+GLuint makeCheckerTexture() {
+    constexpr int N = 64;
+    std::vector<unsigned char> px(N * N * 4);
+    for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x) {
+            const bool on = ((x / 8) ^ (y / 8)) & 1;
+            unsigned char* p = &px[(y * N + x) * 4];
+            p[0] = on ? 210 : 70;
+            p[1] = on ? 150 : 90;
+            p[2] = on ? 70 : 60;
+            p[3] = 255;
+        }
+    return uploadTexture(px.data(), N, N);
 }
 
 // A small demo scene: a scatter of boxes resting on the terrain near the
@@ -358,14 +405,19 @@ onv::scene::Scene buildDemoScene() {
     const float halfMeters = 1.25f;          // ~2.5 m boxes
     const float h = halfMeters / U;          // half-extent in game units
 
-    // Cube model: 8 corners, 12 triangles, vertices in game units.
+    // Cube model: 8 corners, 12 triangles, vertices in game units. A crude UV
+    // per corner and a checkerboard texture exercise the textured draw path.
     onv::nif::Mesh cube;
     const float c[8][3] = {
         {-h, -h, -h}, {h, -h, -h}, {h, h, -h}, {-h, h, -h},
         {-h, -h, h},  {h, -h, h},  {h, h, h},  {-h, h, h}};
-    for (auto& corner : c)
+    for (auto& corner : c) {
         cube.vertices.insert(cube.vertices.end(),
                              {corner[0], corner[1], corner[2]});
+        cube.uvs.insert(cube.uvs.end(),
+                        {corner[0] > 0 ? 1.0f : 0.0f, corner[2] > 0 ? 1.0f : 0.0f});
+    }
+    cube.diffuseTexture = "@demo/checker";
     const std::uint16_t faces[12][3] = {
         {0, 1, 2}, {0, 2, 3}, {4, 6, 5}, {4, 7, 6}, {0, 4, 5}, {0, 5, 1},
         {1, 5, 6}, {1, 6, 2}, {2, 6, 7}, {2, 7, 3}, {3, 7, 4}, {3, 4, 0}};
@@ -515,32 +567,83 @@ int main(int argc, char** argv) {
     };
     updateChunks(1000); // full spawn area
 
-    // ── Placed objects: demo scatter, or real statics from the game files ──
-    onv::scene::Scene scene;
+    // ── Placed objects ──────────────────────────────────────────────────────
+    // Demo: a fixed scatter baked once. Real game: a SceneStreamer feeds the
+    // cells around the player, re-baked when the player crosses a cell border.
+    // Diffuse textures are decoded on demand and uploaded to GL once each.
+    ObjectBatches objBatches;
+    std::map<std::string, GLuint> texIds;
+
+    // Streaming state for the real game path (kept alive for the whole run).
+    std::unique_ptr<onv::records::World> world;
+    std::unique_ptr<onv::assets::DataFiles> vfs;
+    std::unique_ptr<onv::render::TextureCache> texCache;
+    std::unique_ptr<onv::scene::SceneStreamer> streamer;
+    const float OBJ_CELL_UNITS = static_cast<float>(onv::records::CELL_SIZE_UNITS);
+    const float U_M = static_cast<float>(onv::records::UNITS_TO_METERS);
+    const int OBJ_CELL_RADIUS = 2;
+    int lastCellX = INT_MAX, lastCellY = INT_MAX;
+
     if (demo) {
-        scene = buildDemoScene();
+        objBatches = bakeBatches(buildDemoScene());
+        std::printf("Placed demo objects (%zu material batches).\n",
+                    objBatches.size());
     } else if (realTerrain) {
         try {
             const auto dataDir = onv::platform::findFalloutNVData();
             const auto esmPath = onv::platform::findFalloutNVMasterEsm();
             if (dataDir && esmPath) {
-                onv::assets::DataFiles vfs(*dataDir);
-                const auto world = onv::records::loadWorld(*esmPath);
-                const auto loader = onv::scene::makeNifModelLoader(vfs);
-                // Limited to cells near the worldspace origin for this first
-                // pass (object streaming by player position comes later).
-                scene = onv::scene::buildScene(world, realTerrain->worldEditorId,
-                                               loader, 3);
+                vfs = std::make_unique<onv::assets::DataFiles>(*dataDir);
+                texCache = std::make_unique<onv::render::TextureCache>(*vfs);
+                world = std::make_unique<onv::records::World>(
+                    onv::records::loadWorld(*esmPath));
+                streamer = std::make_unique<onv::scene::SceneStreamer>(
+                    *world, realTerrain->worldEditorId,
+                    onv::scene::makeNifModelLoader(*vfs));
+                std::printf("Object streaming ready (%zu populated cells).\n",
+                            streamer->populatedCells().size());
             }
         } catch (const std::exception& e) {
-            std::printf("Object loading skipped (%s).\n", e.what());
+            std::printf("Object streaming unavailable (%s).\n", e.what());
         }
     }
-    const std::vector<float> objectVerts = bakeScene(scene);
-    if (!objectVerts.empty())
-        std::printf("Placed %zu objects (%zu unique models, %zu triangles).\n",
-                    scene.instances.size(), scene.models.size(),
-                    objectVerts.size() / 18);
+
+    // Resolve a batch key to a GL texture, creating it once: the demo checker,
+    // a white fallback for untextured/missing, or the decoded game texture.
+    auto textureFor = [&](const std::string& key) -> GLuint {
+        const auto it = texIds.find(key);
+        if (it != texIds.end()) return it->second;
+        GLuint id;
+        if (key == "@demo/checker") id = makeCheckerTexture();
+        else if (key.empty()) id = makeSolidTexture(150, 140, 125);
+        else if (texCache) {
+            const onv::dds::Image* img = texCache->get(key);
+            id = img ? uploadTexture(img->rgba.data(), img->width, img->height)
+                     : makeSolidTexture(150, 140, 125);
+        } else {
+            id = makeSolidTexture(150, 140, 125);
+        }
+        texIds[key] = id;
+        return id;
+    };
+
+    // Re-bake placed objects for the cells around the player (real game path).
+    auto streamObjects = [&]() {
+        if (!streamer) return;
+        const int cx = static_cast<int>(
+            std::floor((p.x / U_M) / OBJ_CELL_UNITS));
+        const int cy = static_cast<int>(
+            std::floor((-p.z / U_M) / OBJ_CELL_UNITS));
+        if (cx == lastCellX && cy == lastCellY) return;
+        lastCellX = cx; lastCellY = cy;
+        objBatches.clear();
+        for (int dy = -OBJ_CELL_RADIUS; dy <= OBJ_CELL_RADIUS; ++dy)
+            for (int dx = -OBJ_CELL_RADIUS; dx <= OBJ_CELL_RADIUS; ++dx)
+                for (const auto& inst : streamer->cellInstances(cx + dx, cy + dy))
+                    bakeInstance(objBatches, inst,
+                                 streamer->model(inst.modelPath));
+    };
+    streamObjects();
 
     bool running = true;
     Uint32 prev = SDL_GetTicks();
@@ -584,6 +687,7 @@ int main(int argc, char** argv) {
         if (p.y <= ground) { p.y = ground; p.vy = 0; p.grounded = true; }
 
         updateChunks(4);
+        streamObjects();
 
         glClearColor(SKY[0], SKY[1], SKY[2], 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -608,17 +712,26 @@ int main(int argc, char** argv) {
         glDisableClientState(GL_NORMAL_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
 
-        // Placed objects (lit, flat-shaded, single stony material color)
-        if (!objectVerts.empty()) {
-            glColor3f(0.52f, 0.47f, 0.42f);
+        // Placed objects: textured, lit, one draw per material batch.
+        if (!objBatches.empty()) {
+            glEnable(GL_TEXTURE_2D);
+            glColor3f(1, 1, 1); // modulate: let the texture show through
             glEnableClientState(GL_VERTEX_ARRAY);
             glEnableClientState(GL_NORMAL_ARRAY);
-            glVertexPointer(3, GL_FLOAT, 24, objectVerts.data());
-            glNormalPointer(GL_FLOAT, 24, objectVerts.data() + 3);
-            glDrawArrays(GL_TRIANGLES, 0,
-                         static_cast<GLsizei>(objectVerts.size() / 6));
-            glDisableClientState(GL_VERTEX_ARRAY);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            for (const auto& [key, verts] : objBatches) {
+                if (verts.empty()) continue;
+                glBindTexture(GL_TEXTURE_2D, textureFor(key));
+                glVertexPointer(3, GL_FLOAT, 32, verts.data());
+                glNormalPointer(GL_FLOAT, 32, verts.data() + 3);
+                glTexCoordPointer(2, GL_FLOAT, 32, verts.data() + 6);
+                glDrawArrays(GL_TRIANGLES, 0,
+                             static_cast<GLsizei>(verts.size() / 8));
+            }
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             glDisableClientState(GL_NORMAL_ARRAY);
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glDisable(GL_TEXTURE_2D);
         }
 
         // Water plane
