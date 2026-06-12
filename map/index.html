@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open New Vegas — Mojave Wasteland Map</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <header>
+      <h1>OPEN NEW VEGAS</h1>
+      <p class="subtitle">Mojave Wasteland · World Map</p>
+    </header>
+
+    <input id="search" type="search" placeholder="Search locations…" autocomplete="off">
+
+    <section>
+      <h2>Filters</h2>
+      <div id="filters"></div>
+    </section>
+
+    <section class="grow">
+      <h2>Locations <span id="loc-count"></span></h2>
+      <ul id="loc-list"></ul>
+    </section>
+
+    <footer>
+      <p>Drag to pan · scroll to zoom · hover for intel</p>
+      <p class="fine">Unofficial fan project. Original code &amp; data only —
+      no game assets. Terrain is procedurally generated.</p>
+    </footer>
+  </aside>
+
+  <main id="map-pane">
+    <canvas id="map"></canvas>
+    <div id="loading">GENERATING THE MOJAVE…</div>
+    <div id="tooltip"></div>
+  </main>
+
+  <script src="js/data/locations.js"></script>
+  <script src="js/data/roads.js"></script>
+  <script src="js/data/regions.js"></script>
+  <script src="js/terrain.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
