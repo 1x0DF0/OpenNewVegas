@@ -1,12 +1,20 @@
 # Open New Vegas
 
-**A free, open-source engine reimplementation for Fallout: New Vegas —
-the OpenMW approach, aimed at the Mojave.**
+A project with **two goals** around making Fallout: New Vegas better — one you
+can use today, one for the long haul:
 
-The goal: a modern, open engine that plays the *actual* game, one-to-one —
-real quests, real dialogue, real world — by loading the **original data files
-from your own legally-purchased copy** of Fallout: New Vegas. This repository
-ships **zero** Bethesda content. You bring the game; we bring the engine.
+- **🎮 Remaster your own copy now (play today).** A staged mod guide that turns
+  your owned game into a complete, modern-looking, stable New Vegas — HD art,
+  new lighting/weather, ENB, engine fixes. This is the fast path to *playing* a
+  "remastered" New Vegas. See **[docs/REMASTER_GUIDE.md](docs/REMASTER_GUIDE.md)**.
+- **⚙️ A free, open-source engine reimplementation (long-term).** The OpenMW
+  approach: a modern, open engine that plays the *actual* game by loading the
+  **original data files from your own legally-purchased copy**. This repository
+  ships **zero** Bethesda content. You bring the game; we bring the engine.
+  Currently early — renders terrain; everything below describes its progress.
+
+> The engine is years of work (OpenMW took ~a decade); the remaster guide gets
+> you a complete, great-looking game this afternoon. Most people want the guide.
 
 > ⚠️ **Legal note:** This is an unofficial fan project, not affiliated with or
 > endorsed by Bethesda Softworks, Obsidian Entertainment, or ZeniMax/Microsoft.
