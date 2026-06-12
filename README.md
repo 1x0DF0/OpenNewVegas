@@ -30,6 +30,28 @@ project: reimplement the engine, read the originals, render the Mojave.
 
 ## Current status
 
+**Walking prototype** ✅ — walk around the Mojave in first person, two ways:
+
+- **Native (C++/SDL2/OpenGL):** `engine/build/walker` — WASD + mouse look,
+  sprint, jump, gravity, terrain collision, fog. Renders the engine's
+  procedural Mojave terrain model.
+- **Browser (zero install):** open `walk/index.html` — same controls, same
+  terrain. Load *real* worldspace terrain exported from your own game copy
+  with `?src=yourbundle.json` (see below).
+
+**Milestone 2 (partial) — world geometry from your game files** ✅
+
+- `engine/records/` decodes `WRLD` / `CELL` / `LAND` / `REFR` / `STAT` —
+  worldspaces, exterior cells, terrain heightmaps, and object placements
+- `engine/tools/worldexport` stitches a worldspace's LAND heightmaps into a
+  terrain bundle the walker loads — i.e. **walk the real Mojave terrain from
+  your own `FalloutNV.esm`**
+- `engine/tools/laa_patch` — the standard 4GB (Large Address Aware) patch for
+  your own game exe, as a clean open-source tool
+
+Setup guide (4GB patch, NVSE, ultrawide fixes, exporting your worldspace):
+[`docs/PLAY_SETUP.md`](docs/PLAY_SETUP.md).
+
 **Milestone 1 — read the game's file formats** ✅ working, tested
 
 - `engine/formats/bsa.*` — BSA v104 archive reader (the FO3/FNV asset format),

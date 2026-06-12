@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Open New Vegas — Walk the Mojave</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; background: #000;
+                 font-family: "Segoe UI", system-ui, sans-serif; }
+    #gl { display: block; width: 100%; height: 100%; }
+
+    #hud { position: fixed; inset: 0; pointer-events: none; color: #e8ddc8;
+           text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+    #crosshair { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px;
+                 margin: -2px; background: rgba(255,255,255,0.85); border-radius: 50%; }
+    #pos { position: absolute; left: 14px; bottom: 12px; font-size: 12px;
+           color: #cfc4a8; }
+    #place { position: absolute; top: 26px; width: 100%; text-align: center;
+             font-size: 22px; letter-spacing: 3px; color: #f2c14e;
+             opacity: 0; transition: opacity 0.8s; }
+    #compass { position: absolute; top: 10px; width: 100%; text-align: center;
+               font-size: 13px; letter-spacing: 2px; color: #cfc4a8; }
+    #fps { position: absolute; right: 14px; bottom: 12px; font-size: 12px;
+           color: #8a7d5e; }
+
+    #overlay { position: fixed; inset: 0; display: flex; flex-direction: column;
+               align-items: center; justify-content: center; gap: 14px;
+               background: rgba(10, 9, 7, 0.82); color: #d8cdb4; cursor: pointer; }
+    #overlay h1 { color: #f2c14e; letter-spacing: 5px; font-size: 30px; }
+    #overlay .sub { color: #8a7d5e; letter-spacing: 2px; font-size: 12px;
+                    text-transform: uppercase; }
+    #overlay .keys { margin-top: 10px; font-size: 14px; line-height: 1.9;
+                     text-align: center; }
+    #overlay kbd { background: #2a2519; border: 1px solid #4d4634;
+                   border-radius: 3px; padding: 1px 7px; font-size: 12px; }
+    #overlay .click { margin-top: 18px; color: #f2c14e; font-size: 15px;
+                      animation: pulse 1.4s infinite; }
+    #overlay .fine { position: absolute; bottom: 16px; font-size: 10px;
+                     color: #5d543e; max-width: 640px; text-align: center;
+                     line-height: 1.5; padding: 0 20px; }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+    #srcinfo { position: absolute; left: 14px; top: 10px; font-size: 11px;
+               color: #8a7d5e; }
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+
+  <div id="hud">
+    <div id="crosshair"></div>
+    <div id="compass"></div>
+    <div id="place"></div>
+    <div id="pos"></div>
+    <div id="fps"></div>
+    <div id="srcinfo"></div>
+  </div>
+
+  <div id="overlay">
+    <h1>OPEN NEW VEGAS</h1>
+    <div class="sub">Walking Prototype — Mojave Wasteland</div>
+    <div class="keys">
+      <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move &nbsp;
+      <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> jump &nbsp; mouse look
+    </div>
+    <div class="click">CLICK TO ENTER THE MOJAVE</div>
+    <div class="fine">
+      Unofficial fan project — no Bethesda assets or data. Terrain shown is
+      procedurally generated. To walk the real worldspace, export a terrain
+      bundle from your own copy with the engine's <code>worldexport</code> tool
+      and load it with <code>?src=yourbundle.json</code>.
+    </div>
+  </div>
+
+  <script src="../map/js/data/locations.js"></script>
+  <script src="../map/js/terrain.js"></script>
+  <script src="js/walker.js"></script>
+</body>
+</html>

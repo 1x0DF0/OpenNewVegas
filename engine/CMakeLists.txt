@@ -25,7 +25,30 @@ target_link_libraries(bsatool PRIVATE onv_formats)
 add_executable(esmdump tools/esmdump.cpp)
 target_link_libraries(esmdump PRIVATE onv_formats)
 
+add_library(onv_records records/records.cpp)
+target_include_directories(onv_records PUBLIC records)
+target_link_libraries(onv_records PUBLIC onv_formats)
+
+add_executable(worldexport tools/worldexport.cpp)
+target_link_libraries(worldexport PRIVATE onv_records)
+
+find_package(SDL2 QUIET)
+find_package(OpenGL QUIET)
+if(SDL2_FOUND AND OpenGL_FOUND)
+  add_executable(walker walker/main.cpp)
+  target_include_directories(walker PRIVATE ${SDL2_INCLUDE_DIRS})
+  target_link_libraries(walker PRIVATE onv_terrain ${SDL2_LIBRARIES} OpenGL::GL)
+else()
+  message(STATUS "SDL2/OpenGL not found — skipping native walker")
+endif()
+
 enable_testing()
 add_executable(format_tests tests/format_tests.cpp)
 target_link_libraries(format_tests PRIVATE onv_formats)
 add_test(NAME format_tests COMMAND format_tests)
+
+add_executable(records_tests tests/records_tests.cpp)
+target_link_libraries(records_tests PRIVATE onv_records)
+add_test(NAME records_tests COMMAND records_tests)
+
+add_executable(laa_patch tools/laa_patch.cpp)
