@@ -38,6 +38,25 @@ project: reimplement the engine, read the originals, render the Mojave.
 
 ## Current status
 
+**Milestone 3 (started) — placed objects in the world** ✅
+
+The engine now turns object *placements* into rendered geometry:
+
+- `engine/assets/` — a Data-directory virtual filesystem that resolves an
+  asset path to bytes from the mounted BSA archives **and** loose files (loose
+  wins, as in-game)
+- `engine/scene/` — scene assembly: every `REFR` placement resolves through its
+  base `STAT` to a model path, the NIF is loaded from the VFS and decoded, and
+  the object is placed (position / rotation / scale)
+- `engine/tools/scenedump` — run it against your install to see what loads:
+  `scenedump "<...>/Fallout New Vegas/Data" WastelandNV`
+- The native `walker` renders these objects. Try the self-contained demo (no
+  game files needed): `walker --demo` drops a scatter of boxes onto the Mojave
+  through the real placement→model→render path.
+
+Still early: object streaming is limited to cells near the worldspace origin,
+and materials/textures aren't applied yet.
+
 **Walking prototype** ✅ — walk around the Mojave in first person, two ways:
 
 - **Native (C++/SDL2/OpenGL):** `engine/build/walker` — WASD + mouse look,

@@ -15,8 +15,10 @@
 // FalloutNV.esm. If the game isn't found (or fails to load) it falls back to
 // the deterministic procedural terrain model.
 
+#include "../assets/data_files.hpp"
 #include "../platform/game_locator.hpp"
 #include "../records/records.hpp"
+#include "../scene/scene.hpp"
 #include "../terrain/terrain.hpp"
 
 #include <SDL.h>
@@ -277,12 +279,145 @@ bool writePpm(const std::string& path, int w, int h) {
     return true;
 }
 
+// ── Placed objects ──────────────────────────────────────────────────────────
+// Game space is X east, Y north, Z up, in game units. The walker renders in
+// meters with X east, Y up, Z = -north. This maps one to the other.
+void gameUnitsToWalker(float ux, float uy, float uz,
+                       float& wx, float& wy, float& wz) {
+    const float U = static_cast<float>(onv::records::UNITS_TO_METERS);
+    wx = ux * U;
+    wy = uz * U;
+    wz = -uy * U;
+}
+
+// Flatten a scene's instances into one lit, flat-shaded triangle soup in
+// walker meters: 6 floats per vertex (position3, normal3). Each instance's
+// local mesh is scaled, rotated (Rz*Ry*Rx), translated by the REFR position,
+// then converted to walker space.
+std::vector<float> bakeScene(const onv::scene::Scene& sc) {
+    std::vector<float> out;
+    for (const auto& inst : sc.instances) {
+        const auto it = sc.models.find(inst.modelPath);
+        if (it == sc.models.end()) continue;
+
+        const float cx = std::cos(inst.rotX), sx = std::sin(inst.rotX);
+        const float cy = std::cos(inst.rotY), sy = std::sin(inst.rotY);
+        const float cz = std::cos(inst.rotZ), sz = std::sin(inst.rotZ);
+        // R = Rz * Ry * Rx (row-major 3x3)
+        const float R[9] = {
+            cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
+            sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
+            -sy,     cy * sx,                cy * cx};
+
+        auto place = [&](float lx, float ly, float lz,
+                         float& ox, float& oy, float& oz) {
+            lx *= inst.scale; ly *= inst.scale; lz *= inst.scale;
+            const float rx = R[0] * lx + R[1] * ly + R[2] * lz;
+            const float ry = R[3] * lx + R[4] * ly + R[5] * lz;
+            const float rz = R[6] * lx + R[7] * ly + R[8] * lz;
+            gameUnitsToWalker(rx + inst.x, ry + inst.y, rz + inst.z, ox, oy, oz);
+        };
+
+        for (const auto& mesh : it->second.meshes) {
+            for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+                float v[3][3];
+                for (int k = 0; k < 3; ++k) {
+                    const std::uint16_t idx = mesh.indices[t + k];
+                    if (static_cast<std::size_t>(idx) * 3 + 2 >= mesh.vertices.size())
+                        goto next_tri;
+                    place(mesh.vertices[idx * 3], mesh.vertices[idx * 3 + 1],
+                          mesh.vertices[idx * 3 + 2], v[k][0], v[k][1], v[k][2]);
+                }
+                {
+                    // Flat face normal.
+                    const float ax = v[1][0] - v[0][0], ay = v[1][1] - v[0][1],
+                                az = v[1][2] - v[0][2];
+                    const float bx = v[2][0] - v[0][0], by = v[2][1] - v[0][1],
+                                bz = v[2][2] - v[0][2];
+                    float nx = ay * bz - az * by, ny = az * bx - ax * bz,
+                          nz = ax * by - ay * bx;
+                    const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                    if (len > 1e-8f) { nx /= len; ny /= len; nz /= len; }
+                    for (int k = 0; k < 3; ++k) {
+                        out.insert(out.end(),
+                                   {v[k][0], v[k][1], v[k][2], nx, ny, nz});
+                    }
+                }
+            next_tri:;
+            }
+        }
+    }
+    return out;
+}
+
+// A small demo scene: a scatter of boxes resting on the terrain near the
+// spawn, fed through the REAL scene/instance/bake path (no game files needed)
+// so object rendering can be exercised and screenshotted on its own.
+onv::scene::Scene buildDemoScene() {
+    const float U = static_cast<float>(onv::records::UNITS_TO_METERS);
+    const float halfMeters = 1.25f;          // ~2.5 m boxes
+    const float h = halfMeters / U;          // half-extent in game units
+
+    // Cube model: 8 corners, 12 triangles, vertices in game units.
+    onv::nif::Mesh cube;
+    const float c[8][3] = {
+        {-h, -h, -h}, {h, -h, -h}, {h, h, -h}, {-h, h, -h},
+        {-h, -h, h},  {h, -h, h},  {h, h, h},  {-h, h, h}};
+    for (auto& corner : c)
+        cube.vertices.insert(cube.vertices.end(),
+                             {corner[0], corner[1], corner[2]});
+    const std::uint16_t faces[12][3] = {
+        {0, 1, 2}, {0, 2, 3}, {4, 6, 5}, {4, 7, 6}, {0, 4, 5}, {0, 5, 1},
+        {1, 5, 6}, {1, 6, 2}, {2, 6, 7}, {2, 7, 3}, {3, 7, 4}, {3, 4, 0}};
+    for (auto& f : faces) cube.indices.insert(cube.indices.end(), {f[0], f[1], f[2]});
+
+    onv::scene::Scene sc;
+    onv::scene::Model model;
+    model.meshes.push_back(std::move(cube));
+    sc.models.emplace("demo\\cube.nif", std::move(model));
+    sc.worldspaceEditorId = "DemoLand";
+
+    // Scatter boxes in a patch laid out IN FRONT of the spawn view, each
+    // resting on the terrain. Spawn yaw is 0.8 rad; forward and right vectors
+    // match the walker's movement basis.
+    const float sx = 23 * UNIT_M, sz = -35 * UNIT_M;
+    const float yaw = 0.8f;
+    const float fwdX = std::sin(yaw), fwdZ = -std::cos(yaw);
+    const float rightX = std::cos(yaw), rightZ = std::sin(yaw);
+    std::uint32_t id = 0x1000;
+    for (int row = 0; row < 8; ++row)        // depth ahead
+        for (int col = -3; col <= 3; ++col) { // lateral spread
+            const float depth = 8.0f + row * 5.5f;
+            const float lateral = col * 5.0f;
+            const float wx = sx + fwdX * depth + rightX * lateral;
+            const float wz = sz + fwdZ * depth + rightZ * lateral;
+            const float ground = sampleHeight(wx, wz);
+            const float wy = ground + halfMeters;
+            onv::scene::Instance inst;
+            inst.refrFormId = id++;
+            inst.baseFormId = 0x100;
+            inst.modelPath = "demo\\cube.nif";
+            // Walker -> game units (inverse of gameUnitsToWalker).
+            inst.x = wx / U;
+            inst.y = -wz / U;
+            inst.z = wy / U;
+            inst.rotZ = 0.3f * (row + col); // a little variety
+            inst.scale = 1.0f;
+            sc.instances.push_back(std::move(inst));
+        }
+    return sc;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::string screenshotPath;
-    for (int i = 1; i < argc - 1; ++i)
-        if (std::strcmp(argv[i], "--screenshot") == 0) screenshotPath = argv[i + 1];
+    bool demo = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
+            screenshotPath = argv[i + 1];
+        if (std::strcmp(argv[i], "--demo") == 0) demo = true;
+    }
     const bool headless = !screenshotPath.empty();
 
     // ── Choose terrain provider: real Mojave if the game is found, else
@@ -380,6 +515,33 @@ int main(int argc, char** argv) {
     };
     updateChunks(1000); // full spawn area
 
+    // ── Placed objects: demo scatter, or real statics from the game files ──
+    onv::scene::Scene scene;
+    if (demo) {
+        scene = buildDemoScene();
+    } else if (realTerrain) {
+        try {
+            const auto dataDir = onv::platform::findFalloutNVData();
+            const auto esmPath = onv::platform::findFalloutNVMasterEsm();
+            if (dataDir && esmPath) {
+                onv::assets::DataFiles vfs(*dataDir);
+                const auto world = onv::records::loadWorld(*esmPath);
+                const auto loader = onv::scene::makeNifModelLoader(vfs);
+                // Limited to cells near the worldspace origin for this first
+                // pass (object streaming by player position comes later).
+                scene = onv::scene::buildScene(world, realTerrain->worldEditorId,
+                                               loader, 3);
+            }
+        } catch (const std::exception& e) {
+            std::printf("Object loading skipped (%s).\n", e.what());
+        }
+    }
+    const std::vector<float> objectVerts = bakeScene(scene);
+    if (!objectVerts.empty())
+        std::printf("Placed %zu objects (%zu unique models, %zu triangles).\n",
+                    scene.instances.size(), scene.models.size(),
+                    objectVerts.size() / 18);
+
     bool running = true;
     Uint32 prev = SDL_GetTicks();
     int frames = 0;
@@ -445,6 +607,19 @@ int main(int argc, char** argv) {
         glDisableClientState(GL_VERTEX_ARRAY);
         glDisableClientState(GL_NORMAL_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
+
+        // Placed objects (lit, flat-shaded, single stony material color)
+        if (!objectVerts.empty()) {
+            glColor3f(0.52f, 0.47f, 0.42f);
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glEnableClientState(GL_NORMAL_ARRAY);
+            glVertexPointer(3, GL_FLOAT, 24, objectVerts.data());
+            glNormalPointer(GL_FLOAT, 24, objectVerts.data() + 3);
+            glDrawArrays(GL_TRIANGLES, 0,
+                         static_cast<GLsizei>(objectVerts.size() / 6));
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glDisableClientState(GL_NORMAL_ARRAY);
+        }
 
         // Water plane
         glDisable(GL_LIGHTING);
