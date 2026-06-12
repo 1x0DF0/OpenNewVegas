@@ -1,0 +1,178 @@
+name: Build & Release
+
+# Build the engine + tools on Linux and Windows, run the test suite, and
+# publish downloadable binaries. Pushes produce CI artifacts; tags (v*)
+# additionally cut a GitHub Release with per-OS packages.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# The release job needs to create releases / upload assets.
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: deps via apt, straightforward CMake build.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (SDL2, zlib, OpenGL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential \
+            libsdl2-dev zlib1g-dev \
+            libgl1-mesa-dev
+
+      - name: Configure
+        run: cmake -S engine -B build_ci -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build_ci --config Release -j
+
+      - name: Test
+        working-directory: build_ci
+        run: ctest --output-on-failure --build-config Release
+
+      - name: Stage artifacts
+        run: |
+          set -eux
+          mkdir -p dist
+          # The tools live directly in the build dir on single-config generators.
+          for exe in walker esmdump bsatool worldexport export_heightmap laa_patch; do
+            if [ -f "build_ci/$exe" ]; then
+              cp "build_ci/$exe" dist/
+            else
+              echo "WARNING: expected binary '$exe' not found"
+            fi
+          done
+          # Bundle the player-facing docs + launcher alongside the binaries.
+          cp docs/PLAY_SETUP.md dist/ || true
+          cp docs/DOWNLOAD.md dist/ || true
+          cp launcher/play.sh dist/ || true
+          chmod +x dist/play.sh dist/walker 2>/dev/null || true
+          ls -la dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-new-vegas-linux
+          path: dist/
+          if-no-files-found: error
+
+      - name: Package release tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eux
+          tar -czvf open-new-vegas-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist .
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: open-new-vegas-${{ github.ref_name }}-linux-x86_64.tar.gz
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Windows: deps via vcpkg (zlib + sdl2), toolchain handed to CMake.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    env:
+      # vcpkg ships preinstalled on GitHub-hosted Windows runners at this path.
+      VCPKG_ROOT: C:\vcpkg
+      # Use the default DYNAMIC x64 triplet. The engine's CMakeLists locates
+      # SDL2 with find_package(SDL2) and links ${SDL2_LIBRARIES} — the variable
+      # form that vcpkg's SDL2 config (including SDL2main, needed because the
+      # walker uses a plain int main()) populates most reliably for the dynamic
+      # triplet. The trade-off is we ship SDL2.dll, which we copy into dist/.
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: "Install dependencies (vcpkg: zlib, sdl2)"
+        shell: pwsh
+        run: |
+          # Use the runner's bundled vcpkg. OpenGL comes from the Windows SDK,
+          # so only zlib + sdl2 need vcpkg.
+          & "$env:VCPKG_ROOT\vcpkg.exe" install zlib:x64-windows sdl2:x64-windows
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          # Pass the vcpkg toolchain so find_package(SDL2/ZLIB) resolves.
+          cmake -S engine -B build_ci `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -A x64
+
+      - name: Build
+        run: cmake --build build_ci --config Release -j
+
+      - name: Test
+        working-directory: build_ci
+        run: ctest --output-on-failure --build-config Release
+
+      - name: Verify walker built (SDL2 found)
+        shell: pwsh
+        run: |
+          # If SDL2 wasn't found, CMake silently skips the walker target.
+          # Fail loudly here so a broken dependency install can't ship a
+          # release without the playable executable.
+          if (-not (Test-Path "build_ci\Release\walker.exe")) {
+            Write-Error "walker.exe was not produced - SDL2/OpenGL likely not found by CMake"
+            exit 1
+          }
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Multi-config generator (MSVC) puts binaries under Release\.
+          $exes = @("walker","esmdump","bsatool","worldexport","export_heightmap","laa_patch")
+          foreach ($e in $exes) {
+            $p = "build_ci\Release\$e.exe"
+            if (Test-Path $p) { Copy-Item $p dist\ }
+            else { Write-Host "WARNING: expected binary '$e.exe' not found" }
+          }
+          # The dynamic SDL2 needs its runtime DLL beside walker.exe. vcpkg's
+          # applocal step copies DLLs into the build output dir, so grab any
+          # DLLs that landed next to the binaries (SDL2.dll, zlib1.dll, ...).
+          Get-ChildItem "build_ci\Release\*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName dist\ }
+          Copy-Item docs\PLAY_SETUP.md dist\ -ErrorAction SilentlyContinue
+          Copy-Item docs\DOWNLOAD.md   dist\ -ErrorAction SilentlyContinue
+          Copy-Item launcher\play.bat  dist\ -ErrorAction SilentlyContinue
+          Get-ChildItem dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-new-vegas-windows
+          path: dist/
+          if-no-files-found: error
+
+      - name: Package release zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath "open-new-vegas-${{ github.ref_name }}-windows-x64.zip" -Force
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: open-new-vegas-${{ github.ref_name }}-windows-x64.zip
+          fail_on_unmatched_files: true

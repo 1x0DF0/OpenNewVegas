@@ -9,7 +9,14 @@
 //   walker --screenshot out.ppm    render the spawn view offscreen and exit
 //
 // Coordinates: meters. +x east, -z north, +y up. 1 world unit = 350 m.
+//
+// On startup the walker tries to locate the user's own Fallout: New Vegas
+// install and drop them into the REAL Mojave terrain stitched from their
+// FalloutNV.esm. If the game isn't found (or fails to load) it falls back to
+// the deterministic procedural terrain model.
 
+#include "../platform/game_locator.hpp"
+#include "../records/records.hpp"
 #include "../terrain/terrain.hpp"
 
 #include <SDL.h>
@@ -19,7 +26,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,10 +54,138 @@ float detail(float x, float n) {
            0.22f * std::sin(x * 0.31f - n * 0.27f);
 }
 
-float sampleHeight(float x, float z) {
-    const float n = -z; // northing
-    return static_cast<float>(onv::elevation(x / UNIT_M, n / UNIT_M)) + detail(x, n);
+// ── Runtime terrain provider ────────────────────────────────────────────────
+// Both the mesh build and the ground/collision sampling go through the active
+// provider so the rendered ground and what the player walks on stay consistent.
+// Convention: sample(xEast, zNorth) with northing n = -z, matching the
+// procedural model and the walker's coordinate system.
+struct HeightProvider {
+    virtual ~HeightProvider() = default;
+    virtual float sample(float xEast, float zNorth) const = 0;
+    virtual const char* name() const = 0;
+};
+
+// Existing behavior: deterministic procedural Mojave + walking-scale bumps.
+struct ProceduralProvider : HeightProvider {
+    float sample(float x, float z) const override {
+        const float n = -z; // northing
+        return static_cast<float>(onv::elevation(x / UNIT_M, n / UNIT_M)) +
+               detail(x, n);
+    }
+    const char* name() const override { return "procedural"; }
+};
+
+// Real Mojave terrain: a worldspace's LAND heightmaps stitched into one grid,
+// in meters, sampled bilinearly. Stitching mirrors tools/worldexport.cpp.
+struct RealTerrainProvider : HeightProvider {
+    std::vector<float> grid; // row-major, row 0 = SOUTH edge, in meters
+    int width = 0, height = 0;
+    float spacing = 1.0f;    // meters between posts
+    float originX = 0.0f;    // east-coordinate (m) of the west edge (col 0)
+    float originY = 0.0f;    // north-coordinate (m) of the south edge (row 0)
+    std::string worldEditorId;
+    std::size_t cellCount = 0;
+
+    float at(int col, int row) const {
+        col = std::clamp(col, 0, width - 1);
+        row = std::clamp(row, 0, height - 1);
+        return grid[static_cast<std::size_t>(row) * width + col];
+    }
+
+    float sample(float x, float z) const override {
+        const float n = -z; // northing, matching worldexport's "north" axis
+        const float fc = (x - originX) / spacing;       // column (east)
+        const float fr = (n - originY) / spacing;       // row (north)
+        const int c0 = static_cast<int>(std::floor(fc));
+        const int r0 = static_cast<int>(std::floor(fr));
+        const float tx = std::clamp(fc - c0, 0.0f, 1.0f);
+        const float tz = std::clamp(fr - r0, 0.0f, 1.0f);
+        const float h00 = at(c0, r0), h10 = at(c0 + 1, r0);
+        const float h01 = at(c0, r0 + 1), h11 = at(c0 + 1, r0 + 1);
+        const float a = h00 + (h10 - h00) * tx;
+        const float b = h01 + (h11 - h01) * tx;
+        return a + (b - a) * tz;
+    }
+
+    const char* name() const override { return "real (FalloutNV.esm)"; }
+
+    // Center of the stitched grid, in walker coordinates (x east, z = -north).
+    void centerSpawn(float& outX, float& outZ) const {
+        outX = originX + 0.5f * (width - 1) * spacing;
+        const float north = originY + 0.5f * (height - 1) * spacing;
+        outZ = -north;
+    }
+};
+
+// Build a RealTerrainProvider from a plugin. Throws on parse / no-terrain.
+std::unique_ptr<RealTerrainProvider> buildRealTerrain(const std::string& esmPath) {
+    using namespace onv::records;
+    const World world = loadWorld(esmPath);
+
+    // Pick the main exterior worldspace: prefer "WastelandNV", else the one
+    // with the most cells that carry LAND terrain.
+    const Worldspace* chosen = world.findWorldspace("WastelandNV");
+    if (!chosen) {
+        std::size_t best = 0;
+        for (const auto& w : world.worldspaces) {
+            std::size_t landCells = 0;
+            for (const auto& [grid, cell] : w.cells)
+                if (cell.land) ++landCells;
+            if (landCells > best) {
+                best = landCells;
+                chosen = &w;
+            }
+        }
+    }
+    if (!chosen)
+        throw std::runtime_error("no worldspace with terrain found in plugin");
+
+    // Bounds over cells that have LAND.
+    std::int32_t minX = std::numeric_limits<std::int32_t>::max(), minY = minX;
+    std::int32_t maxX = std::numeric_limits<std::int32_t>::min(), maxY = maxX;
+    std::size_t landCells = 0;
+    for (const auto& [grid, cell] : chosen->cells) {
+        if (!cell.land) continue;
+        ++landCells;
+        minX = std::min(minX, grid.first);
+        maxX = std::max(maxX, grid.first);
+        minY = std::min(minY, grid.second);
+        maxY = std::max(maxY, grid.second);
+    }
+    if (landCells == 0)
+        throw std::runtime_error("chosen worldspace has no LAND cells");
+
+    auto rt = std::make_unique<RealTerrainProvider>();
+    rt->worldEditorId = chosen->editorId.empty() ? "<unnamed>" : chosen->editorId;
+    rt->cellCount = landCells;
+
+    // Stitch: cells share edge posts, so the grid is 32 posts per cell + 1.
+    const int cellsX = maxX - minX + 1, cellsY = maxY - minY + 1;
+    rt->width = cellsX * (LAND_GRID - 1) + 1;
+    rt->height = cellsY * (LAND_GRID - 1) + 1;
+    rt->spacing = static_cast<float>(CELL_SIZE_UNITS / (LAND_GRID - 1) *
+                                     UNITS_TO_METERS);
+    rt->originX = static_cast<float>(minX * CELL_SIZE_UNITS * UNITS_TO_METERS);
+    rt->originY = static_cast<float>(minY * CELL_SIZE_UNITS * UNITS_TO_METERS);
+
+    rt->grid.assign(static_cast<std::size_t>(rt->width) * rt->height, 0.0f);
+    for (const auto& [grid, cell] : chosen->cells) {
+        if (!cell.land) continue;
+        const int baseX = (cell.gridX - minX) * (LAND_GRID - 1);
+        const int baseY = (cell.gridY - minY) * (LAND_GRID - 1);
+        for (int r = 0; r < LAND_GRID; ++r)
+            for (int c = 0; c < LAND_GRID; ++c)
+                rt->grid[static_cast<std::size_t>(baseY + r) * rt->width +
+                         baseX + c] =
+                    static_cast<float>(cell.land->at(r, c) * UNITS_TO_METERS);
+    }
+    return rt;
 }
+
+// The active provider (set in main). buildChunk + collision read it.
+const HeightProvider* gProvider = nullptr;
+
+float sampleHeight(float x, float z) { return gProvider->sample(x, z); }
 
 void elevColor(float e, float* rgb) {
     static const float stops[6][4] = {
@@ -147,6 +285,34 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--screenshot") == 0) screenshotPath = argv[i + 1];
     const bool headless = !screenshotPath.empty();
 
+    // ── Choose terrain provider: real Mojave if the game is found, else
+    //    procedural. Loading is wrapped so a parse error never crashes us. ──
+    ProceduralProvider procedural;
+    std::unique_ptr<RealTerrainProvider> realTerrain;
+    bool spawnAtRealCenter = false;
+    if (auto esm = onv::platform::findFalloutNVMasterEsm()) {
+        std::printf("Fallout: New Vegas found at %s\n", esm->c_str());
+        try {
+            realTerrain = buildRealTerrain(*esm);
+            gProvider = realTerrain.get();
+            spawnAtRealCenter = true;
+            std::printf("Loaded real worldspace \"%s\" (%zu LAND cells, "
+                        "%d x %d posts) — walking the real Mojave.\n",
+                        realTerrain->worldEditorId.c_str(),
+                        realTerrain->cellCount, realTerrain->width,
+                        realTerrain->height);
+        } catch (const std::exception& e) {
+            std::printf("Could not load real terrain (%s) — "
+                        "using procedural Mojave.\n", e.what());
+            realTerrain.reset();
+            gProvider = &procedural;
+        }
+    } else {
+        std::printf("Fallout: New Vegas install not found — "
+                    "using procedural Mojave (set ONV_FNV_PATH to override).\n");
+        gProvider = &procedural;
+    }
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -186,6 +352,8 @@ int main(int argc, char** argv) {
     const auto indices = chunkIndices();
     std::map<std::pair<int, int>, Chunk> chunks;
     Player p;
+    if (spawnAtRealCenter && realTerrain)
+        realTerrain->centerSpawn(p.x, p.z); // center of the real terrain grid
     p.y = sampleHeight(p.x, p.z) + EYE;
 
     auto updateChunks = [&](int budget) {
