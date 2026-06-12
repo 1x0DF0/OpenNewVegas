@@ -13,13 +13,18 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace onv::nif {
 
 struct Mesh {
     std::vector<float> vertices;          // x,y,z triples (game units)
+    std::vector<float> uvs;               // u,v pairs, parallel to vertices
+                                          // (empty if the shape has no UVs)
     std::vector<std::uint16_t> indices;   // triangle list
+    std::string diffuseTexture;           // diffuse .dds path from the shape's
+                                          // texture set ("" if none)
 };
 
 // Decode the geometry meshes from a NIF file's bytes.

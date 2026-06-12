@@ -65,4 +65,36 @@ Scene buildScene(const records::World& world,
 // (trying both the bare path and a "meshes\\" prefix) and decode it.
 ModelLoader makeNifModelLoader(const assets::DataFiles& vfs);
 
+// Streams placed objects a cell at a time, so a renderer can load objects
+// around the player instead of all at once. Models are loaded lazily and
+// cached, shared across cells; per-cell instance lists are built on first
+// request and cached. The referenced World and loader must outlive the
+// streamer.
+class SceneStreamer {
+public:
+    SceneStreamer(const records::World& world,
+                  const std::string& worldspaceEditorId, ModelLoader loader);
+
+    // Instances placed in exterior cell (gx, gy). Built and cached on first
+    // request; returns an empty list for cells with no placeable statics.
+    const std::vector<Instance>& cellInstances(int gx, int gy);
+
+    // A model previously loaded during cellInstances(), or nullptr.
+    const Model* model(const std::string& modelPath) const;
+
+    // Every cell in the worldspace that holds at least one REFR.
+    const std::vector<std::pair<int, int>>& populatedCells() const;
+
+    const std::string& worldspaceEditorId() const;
+
+private:
+    const records::World& world_;
+    const records::Worldspace* ws_ = nullptr;
+    std::string worldspaceEditorId_;
+    ModelLoader loader_;
+    std::map<std::string, Model> models_;
+    std::map<std::pair<int, int>, std::vector<Instance>> cellCache_;
+    std::vector<std::pair<int, int>> populated_;
+};
+
 } // namespace onv::scene

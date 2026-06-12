@@ -43,6 +43,11 @@ add_library(onv_scene scene/scene.cpp)
 target_include_directories(onv_scene PUBLIC scene)
 target_link_libraries(onv_scene PUBLIC onv_records onv_assets)
 
+# CPU-side render support (texture decode/cache).
+add_library(onv_render render/texture_cache.cpp)
+target_include_directories(onv_render PUBLIC render)
+target_link_libraries(onv_render PUBLIC onv_assets onv_formats)
+
 add_executable(worldexport tools/worldexport.cpp)
 target_link_libraries(worldexport PRIVATE onv_records)
 
@@ -57,7 +62,7 @@ if(SDL2_FOUND AND OpenGL_FOUND)
   add_executable(walker walker/main.cpp)
   target_include_directories(walker PRIVATE ${SDL2_INCLUDE_DIRS})
   target_link_libraries(walker PRIVATE
-    onv_terrain onv_records onv_platform onv_scene onv_assets
+    onv_terrain onv_records onv_platform onv_scene onv_assets onv_render
     ${SDL2_LIBRARIES} OpenGL::GL)
 else()
   message(STATUS "SDL2/OpenGL not found — skipping native walker")
@@ -87,3 +92,7 @@ add_test(NAME data_files_tests COMMAND data_files_tests)
 add_executable(scene_tests tests/scene_tests.cpp)
 target_link_libraries(scene_tests PRIVATE onv_scene)
 add_test(NAME scene_tests COMMAND scene_tests)
+
+add_executable(texture_cache_tests tests/texture_cache_tests.cpp)
+target_link_libraries(texture_cache_tests PRIVATE onv_render)
+add_test(NAME texture_cache_tests COMMAND texture_cache_tests)

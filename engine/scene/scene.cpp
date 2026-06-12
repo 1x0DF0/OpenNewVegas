@@ -84,6 +84,35 @@ Scene buildScene(const records::World& world,
     return scene;
 }
 
+// ── SceneStreamer ─── STUB: implemented by the streaming work stream. ────────
+SceneStreamer::SceneStreamer(const records::World& world,
+                             const std::string& worldspaceEditorId,
+                             ModelLoader loader)
+    : world_(world), worldspaceEditorId_(worldspaceEditorId),
+      loader_(std::move(loader)) {
+    ws_ = pickWorldspace(world_, worldspaceEditorId_);
+    if (ws_) worldspaceEditorId_ = ws_->editorId;
+}
+
+const std::vector<Instance>& SceneStreamer::cellInstances(int gx, int gy) {
+    static const std::vector<Instance> kEmpty;
+    (void)gx; (void)gy;
+    return kEmpty;
+}
+
+const Model* SceneStreamer::model(const std::string& modelPath) const {
+    const auto it = models_.find(modelPath);
+    return it == models_.end() ? nullptr : &it->second;
+}
+
+const std::vector<std::pair<int, int>>& SceneStreamer::populatedCells() const {
+    return populated_;
+}
+
+const std::string& SceneStreamer::worldspaceEditorId() const {
+    return worldspaceEditorId_;
+}
+
 ModelLoader makeNifModelLoader(const assets::DataFiles& vfs) {
     return [&vfs](const std::string& modelPath) -> std::optional<Model> {
         // STAT model paths are stored relative to the meshes\ root and usually
