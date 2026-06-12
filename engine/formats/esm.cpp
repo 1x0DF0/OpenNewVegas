@@ -54,6 +54,9 @@ void parseSubrecords(const std::uint8_t* data, std::size_t size, Record& rec) {
         sub.data = r.readVector(len);
         rec.subrecords.push_back(std::move(sub));
     }
+    if (overrideSize)
+        throw std::runtime_error(
+            "malformed record: XXXX size override with no following subrecord");
 }
 
 struct Walker {
@@ -93,6 +96,13 @@ struct Walker {
                             throw std::runtime_error("malformed compressed record");
                         BinaryReader br(body);
                         const auto rawSize = br.read<std::uint32_t>();
+                        // Attacker-controlled field: zlib's best case is
+                        // ~1032:1, so reject implausible declared sizes
+                        // before allocating.
+                        if (rawSize > (body.size() - 4) * 1032 + 1024)
+                            throw std::runtime_error(
+                                "compressed record declares implausible "
+                                "decompressed size");
                         const auto inflated =
                             zlibInflate(body.data() + 4, body.size() - 4, rawSize);
                         parseSubrecords(inflated.data(), inflated.size(), rec);

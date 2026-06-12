@@ -97,6 +97,16 @@ Archive::Archive(const std::string& filePath) : filePath_(filePath) {
     const bool dirNames = archiveFlags & FLAG_INCLUDE_DIR_NAMES;
     const bool fileNames = archiveFlags & FLAG_INCLUDE_FILE_NAMES;
 
+    // Header counts/lengths are attacker-controlled; bound them by what the
+    // file could physically hold (16 bytes per folder/file record) so a tiny
+    // corrupt file can't drive multi-GB allocations or silent garbage.
+    if (folderCount > buf.size() / 16)
+        throw std::runtime_error("BSA folderCount exceeds file capacity");
+    if (fileCount > buf.size() / 16)
+        throw std::runtime_error("BSA fileCount exceeds file capacity");
+    if (totalFileNameLength > buf.size())
+        throw std::runtime_error("BSA totalFileNameLength exceeds file size");
+
     // Folder records: hash(8), fileCount(4), offset(4)
     struct FolderRec { std::uint64_t hash; std::uint32_t count, offset; };
     r.seek(folderRecordOffset);
@@ -154,7 +164,14 @@ std::vector<std::uint8_t> Archive::extract(const FileEntry& entry) const {
     }
     if (entry.compressed) {
         const auto originalSize = r.read<std::uint32_t>();
-        return zlibInflate(raw.data() + r.pos(), raw.size() - r.pos(), originalSize);
+        // The declared decompressed size is attacker-controlled. zlib's best
+        // case is ~1032:1, so anything beyond that (plus slack) is malformed;
+        // reject before allocating instead of trusting a 4-byte field.
+        const std::size_t srcLen = raw.size() - r.pos();
+        if (originalSize > srcLen * 1032 + 1024)
+            throw std::runtime_error(
+                "BSA compressed entry declares implausible decompressed size");
+        return zlibInflate(raw.data() + r.pos(), srcLen, originalSize);
     }
     return std::vector<std::uint8_t>(raw.begin() + r.pos(), raw.end());
 }

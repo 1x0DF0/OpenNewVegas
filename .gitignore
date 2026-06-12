@@ -3,3 +3,5 @@ engine/build_*/
 build_*/
 *.pgm
 *.ppm
+build_*/
+*.ppm

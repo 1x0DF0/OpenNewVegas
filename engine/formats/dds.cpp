@@ -296,7 +296,21 @@ Image decode(const std::vector<std::uint8_t>& bytes) {
     Image img;
     img.width = static_cast<int>(h.width);
     img.height = static_cast<int>(h.height);
-    img.rgba.assign(static_cast<std::size_t>(img.width) * img.height * 4, 0);
+
+    // Dimensions are attacker-controlled; bound the output allocation by the
+    // surface data the file can actually contain. The smallest supported
+    // encoding is DXT1 at 8 bytes per 4x4 block (16:1 vs RGBA8), so the
+    // decoded size can never exceed 16x the remaining bytes. Also reject
+    // dimensions beyond any real GPU surface.
+    constexpr std::uint32_t MAX_DIM = 16384;
+    if (h.width > MAX_DIM || h.height > MAX_DIM)
+        throw std::runtime_error("DDS dimensions exceed sane texture limits");
+    const std::size_t outBytes =
+        static_cast<std::size_t>(img.width) * img.height * 4;
+    if (outBytes > r.remaining() * 16 + 4096)
+        throw std::runtime_error(
+            "DDS declares dimensions larger than its surface data");
+    img.rgba.assign(outBytes, 0);
 
     const PixelFormat& pf = h.pf;
     if (pf.flags & DDPF_FOURCC) {
