@@ -96,3 +96,11 @@ add_test(NAME scene_tests COMMAND scene_tests)
 add_executable(texture_cache_tests tests/texture_cache_tests.cpp)
 target_link_libraries(texture_cache_tests PRIVATE onv_render)
 add_test(NAME texture_cache_tests COMMAND texture_cache_tests)
+
+add_executable(integration_tests tests/integration_tests.cpp)
+target_link_libraries(integration_tests PRIVATE onv_scene onv_render onv_platform)
+add_test(NAME integration_tests COMMAND integration_tests)
+
+add_executable(robustness_tests tests/robustness_tests.cpp)
+target_link_libraries(robustness_tests PRIVATE onv_scene onv_render)
+add_test(NAME robustness_tests COMMAND robustness_tests)
